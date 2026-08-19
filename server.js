@@ -31,6 +31,35 @@ app.get('/api/readings', (req, res) => {
   });
 });
 
+app.post('/api/createUser', (req, res) => {
+  const { username, password, hash } = req.body;
+  if (!username || !password || !hash) {
+    return res.status(400).json({ success: false, message: 'Missing required fields' });
+  }
+
+  createUser(username, password, hash)
+    .then(() => res.json({ success: true, message: 'User created successfully' }))
+    .catch((error) => res.status(500).json({ success: false, message: error.message }));
+});
+
+app.post('/api/validateUser', (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ success: false, message: 'Missing required fields' });
+  }
+
+  isUser(username, password)
+    .then((user) => {
+      if (user) {
+        res.json({ success: true, message: 'User validated successfully', hash: user.hash });
+      } else {
+        res.status(401).json({ success: false, message: 'Invalid username or password' });
+      }
+    })
+    .catch((error) => res.status(500).json({ success: false, message: error.message }));
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`the server is running`);
 });
