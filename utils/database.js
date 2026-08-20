@@ -62,20 +62,27 @@ function createUser(username, password, hash) {
 function isUser(username, password) {
     const db = new sqlite3.Database(databasePath);
     return new Promise((resolve, reject) => {
-        db.get('SELECT * FROM users WHERE username = ? AND password = ?', [username, password], (error, row) => {
-            if (error) {
-                db.close(() => reject(error));
-                return;
-            }
-
-            db.close((error) => {
+        db.get(
+            `SELECT users.*, macHash.hash
+             FROM users
+             LEFT JOIN macHash ON macHash.macID = users.macID
+             WHERE users.username = ? AND users.password = ?`,
+            [username, password],
+            (error, row) => {
                 if (error) {
-                    reject(error);
-                } else {
-                    resolve(row); // row will be undefined if no match is found
+                    db.close(() => reject(error));
+                    return;
                 }
-            });
-        });
+
+                db.close((error) => {
+                    if (error) {
+                        reject(error);
+                    } else {
+                        resolve(row); // row will be undefined if no match is found
+                    }
+                });
+            }
+        );
     });
 }
 
