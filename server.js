@@ -1,7 +1,8 @@
 const express = require('express');
+const { createUser, isUser, isHashExists, isHashHasUser, isUsernameExists } = require('./utils/database');
 const app = express();
 const PORT = 5000;
-
+  
 app.use(express.json());
 
 // Main endpoint to fetch system readings
@@ -33,13 +34,24 @@ app.get('/api/readings', (req, res) => {
 
 app.post('/api/createUser', (req, res) => {
   const { username, password, hash } = req.body;
+  
   if (!username || !password || !hash) {
     return res.status(400).json({ success: false, message: 'Missing required fields' });
   }
-
-  createUser(username, password, hash)
-    .then(() => res.json({ success: true, message: 'User created successfully' }))
-    .catch((error) => res.status(500).json({ success: false, message: error.message }));
+  if(isHashExists(hash)) {
+    if(isHashHasUser(hash)) {
+      return res.status(400).json({ success: false, message: 'User already exists' });
+    }
+    if(isUsernameExists(username)) {
+      return res.status(400).json({ success: false, message: 'Username already exists' });
+    }
+    createUser(username, password, hash)
+      .then(() => res.json({ success: true, message: 'User created successfully' }))
+      .catch((error) => res.status(500).json({ success: false, message: error.message }));
+}
+else {
+  res.status(400).json({ success: false, message: 'Invalid hash provided' });
+}
 });
 
 app.post('/api/validateUser', (req, res) => {
