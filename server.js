@@ -32,26 +32,32 @@ app.get('/api/readings', (req, res) => {
   });
 });
 
-app.post('/api/createUser', (req, res) => {
+app.post('/api/createUser', async (req, res) => {
   const { username, password, hash } = req.body;
   
   if (!username || !password || !hash) {
     return res.status(400).json({ success: false, message: 'Missing required fields' });
   }
-  if(isHashExists(hash)) {
-    if(isHashHasUser(hash)) {
+
+  try {
+    if (!(await isHashExists(hash))) {
+      return res.status(400).json({ success: false, message: 'Invalid hash provided' });
+    }
+
+    if (await isHashHasUser(hash)) {
       return res.status(400).json({ success: false, message: 'User already exists' });
     }
-    if(isUsernameExists(username)) {
+
+    if (await isUsernameExists(username)) {
       return res.status(400).json({ success: false, message: 'Username already exists' });
     }
+
     createUser(username, password, hash)
       .then(() => res.json({ success: true, message: 'User created successfully' }))
       .catch((error) => res.status(500).json({ success: false, message: error.message }));
-}
-else {
-  res.status(400).json({ success: false, message: 'Invalid hash provided' });
-}
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 app.post('/api/validateUser', (req, res) => {
