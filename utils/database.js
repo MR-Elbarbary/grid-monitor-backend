@@ -146,5 +146,52 @@ function getUserMacID(username) {
     });
 }
 
+function updateUserPassword(username, oldPassword, newPassword) {
+    const db = new sqlite3.Database(databasePath);
+    return new Promise((resolve, reject) => {
+        db.run(
+            'UPDATE users SET password = ? WHERE username = ? AND password = ?',
+            [newPassword, username, oldPassword],
+            function (error) {
+                if (error) {
+                    db.close(() => reject(error));
+                    return;
+                }
 
-module.exports = { saveMacIDHash, createUser, isUser, getUserMacID, isHashExists, isHashHasUser, isUsernameExists };
+                db.close((error) => {
+                    if (error) {
+                        reject(error);
+                    } else {
+                        resolve(this.changes > 0); // returns true if a row was updated, false otherwise
+                    }
+                });
+            }
+        );
+    });
+}
+
+function updateUsername(oldUsername, newUsername) {
+    const db = new sqlite3.Database(databasePath);
+    return new Promise((resolve, reject) => {
+        db.run(
+            'UPDATE users SET username = ? WHERE username = ?',
+            [newUsername, oldUsername],
+            function (error) {
+                if (error) {
+                    db.close(() => reject(error));
+                    return;
+                }
+
+                db.close((error) => {
+                    if (error) {
+                        reject(error);
+                    } else {
+                        resolve(this.changes > 0); // returns true if a row was updated, false otherwise
+                    }
+                });
+            }
+        );
+    });
+}
+
+module.exports = { saveMacIDHash, createUser, isUser, getUserMacID, isHashExists, isHashHasUser, isUsernameExists, updateUserPassword, updateUsername };

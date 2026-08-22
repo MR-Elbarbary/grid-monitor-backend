@@ -1,5 +1,5 @@
 const express = require('express');
-const { createUser, isUser, isHashExists, isHashHasUser, isUsernameExists } = require('./utils/database');
+const { createUser, isUser, isHashExists, isHashHasUser, isUsernameExists, updateUserPassword, updateUsername } = require('./utils/database');
 const app = express();
 const PORT = 5000;
   
@@ -7,6 +7,7 @@ app.use(express.json());
 
 // Main endpoint to fetch system readings
 app.get('/api/readings', (req, res) => {
+  console.log('received')
   // Generate a random total of units (between 3 and 7 cards)
   const unitCount = Math.floor(Math.random() * 5) + 3;
   
@@ -33,6 +34,7 @@ app.get('/api/readings', (req, res) => {
 });
 
 app.post('/api/createUser', async (req, res) => {
+  console.log('received')
   const { username, password, hash } = req.body;
   
   if (!username || !password || !hash) {
@@ -61,6 +63,7 @@ app.post('/api/createUser', async (req, res) => {
 });
 
 app.post('/api/validateUser', (req, res) => {
+  console.log('received')
   const { username, password } = req.body;
 
   if (!username || !password) {
@@ -73,6 +76,51 @@ app.post('/api/validateUser', (req, res) => {
         res.json({ success: true, message: 'User validated successfully', hash: user.hash });
       } else {
         res.status(401).json({ success: false, message: 'Invalid username or password' });
+      }
+    })
+    .catch((error) => res.status(500).json({ success: false, message: error.message }));
+});
+
+app.post('api/changePassword', (req, res) => {
+  console.log('received')
+  const { username, oldPassword, newPassword } = req.body;
+
+  if (!username || !oldPassword || !newPassword) {
+    return res.status(400).json({ success: false, message: 'Missing required fields' });
+  }
+
+  isUser(username, oldPassword)
+    .then((user) => {
+      if (user) {
+        updateUserPassword(username, oldPassword, newPassword)
+          .then(() => res.json({ success: true, message: 'Password changed successfully' }))
+          .catch((error) => res.status(500).json({ success: false, message: error.message }));
+      } else {
+        res.status(401).json({ success: false, message: 'Invalid username or old password' });
+      }
+    })
+    .catch((error) => res.status(500).json({ success: false, message: error.message }));
+});
+
+app.post('/api/changeUsername', (req, res) => {
+  console.log('received')
+  const { oldUsername, newUsername, password } = req.body;
+
+  if (!oldUsername || !newUsername || !password) {
+    return res.status(400).json({ success: false, message: 'Missing required fields' });
+  }
+
+  isUser(oldUsername, password)
+    .then(async (user) => {
+      if (user) {
+        if (await isUsernameExists(newUsername)) {
+          return res.status(400).json({ success: false, message: 'New username already exists' });
+        }
+        updateUsername(oldUsername, newUsername)
+          .then(() => res.json({ success: true, message: 'Username changed successfully' }))
+          .catch((error) => res.status(500).json({ success: false, message: error.message }));
+      } else {
+        res.status(401).json({ success: false, message: 'Invalid old username or password' });
       }
     })
     .catch((error) => res.status(500).json({ success: false, message: error.message }));
