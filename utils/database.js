@@ -41,12 +41,12 @@ function isHashExists(hash) {
     });
 }
 
-function createUser(username, password, hash) {
+function createUser(username, email, password, hash) {
     const db = new sqlite3.Database(databasePath);
     return new Promise((resolve, reject) => {
         db.run(
-            'INSERT INTO users (username, password, macID) SELECT ?, ?, macID FROM macHash WHERE hash = ?',
-            [username, password, hash],
+            'INSERT INTO users (username, email, password, macID) SELECT ?, ?, ?, macID FROM macHash WHERE hash = ?',
+            [username, email, password, hash],
             (error) => {
             if (error) {
                 db.close(() => reject(error));

@@ -35,9 +35,9 @@ app.get('/api/readings', (req, res) => {
 
 app.post('/api/createUser', async (req, res) => {
   console.log('received')
-  const { username, password, hash } = req.body;
+  const { username, email, password, hash } = req.body;
   
-  if (!username || !password || !hash) {
+  if (!username || !email || !password || !hash) {
     return res.status(400).json({ success: false, message: 'Missing required fields' });
   }
 
@@ -54,7 +54,7 @@ app.post('/api/createUser', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Username already exists' });
     }
 
-    createUser(username, password, hash)
+    createUser(username, email, password, hash)
       .then(() => res.json({ success: true, message: 'User created successfully' }))
       .catch((error) => res.status(500).json({ success: false, message: error.message }));
   } catch (error) {
