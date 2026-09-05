@@ -1,36 +1,188 @@
 const express = require('express');
-const { createUser, isUser, isHashExists, isHashHasUser, isUsernameExists, updateUserPassword, updateUsername } = require('./utils/database');
+
+const mqtt = require('mqtt');
+const initializeDatabase = require('./db_init.js');
+
+const db = initializeDatabase();
+
+const { createUser, isUser, isUsernameExists, updateUserPassword, updateUsername } = require('./utils/database');
 const app = express();
 const PORT = 5000;
   
 app.use(express.json());
 
-// Main endpoint to fetch system readings
-app.get('/api/readings', (req, res) => {
-  console.log('received')
-  // Generate a random total of units (between 3 and 7 cards)
-  const unitCount = Math.floor(Math.random() * 5) + 3;
-  
-  const unitsData = Array.from({ length: unitCount }, (_, index) => {
-    const unitId = index + 1;
-    return {
-      id: `UNIT-${1000 + unitId}`,
-      name: `Power Core Unit #${unitId}`,
-      metrics: {
-        current: parseFloat((Math.random() * 15 + 2).toFixed(2)),     // 2A - 17A
-        voltage: parseFloat((Math.random() * 20 + 210).toFixed(1)),   // 210V - 230V
-        temperature: parseFloat((Math.random() * 40 + 30).toFixed(1)) // 30°C - 70°C
-      },
-      timestamp: new Date().toISOString()
-    };
+
+const MQTT_BROKER = 'mqtt://broker.hivemq.com:1883';
+const TOPIC_TELEMETRY = 'site/alex/telemetry';
+
+const mqttClient = mqtt.connect(MQTT_BROKER, {
+  clientId: 'express_backend_' + Math.random().toString(16).substring(2, 8),
+  clean: true,
+});
+
+
+const upsertGateway = db.prepare(`
+  INSERT INTO gateways (gw, site, fw, uid, last_seen_ts)
+  VALUES (@gw, @site, @fw, @uid, @ts)
+  ON CONFLICT(gw) DO UPDATE SET
+    site = excluded.site,
+    fw = excluded.fw,
+    uid = excluded.uid,
+    last_seen_ts = excluded.last_seen_ts,
+    updated_at = CURRENT_TIMESTAMP
+`);
+
+const upsertDevice = db.prepare(`
+  INSERT INTO devices (gw, node, site, addr, state, last_seen_ts)
+  VALUES (@gw, @node, @site, @addr, @state, @ts)
+  ON CONFLICT(gw, node) DO UPDATE SET
+    site = excluded.site,
+    addr = excluded.addr,
+    state = excluded.state,
+    last_seen_ts = excluded.last_seen_ts
+`);
+
+const insertFrame = db.prepare(`
+  INSERT INTO telemetry_frames (site, gw, seq, ts, temp_val, temp_unit, temp_valid, vdda_mv, rssi, heap_free, raw_payload)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const insertReading = db.prepare(`
+  INSERT INTO device_readings (frame_id, gw, node, state, i_l1, i_l2, i_l3, i_valid, unbal_pct, uptime_s, starts)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+
+
+// Atomic Transaction to Save Data
+const savePayloadTransaction = db.transaction((payload) => {
+  upsertGateway.run({
+    gw: payload.gw,
+    site: payload.site,
+    fw: payload.diag?.fw ?? null,
+    uid: payload.diag?.uid ?? null,
+    ts: payload.ts,
   });
 
-  // Return the data as a clean JSON wrapper payload
-  res.json({
-    success: true,
-    total_units: unitCount,
-    data: unitsData
+  const frameRes = insertFrame.run(
+    payload.site,
+    payload.gw,
+    payload.seq,
+    payload.ts,
+    payload.t?.val ?? null,
+    payload.t?.unit ?? 'C',
+    payload.t?.valid ? 1 : 0,
+    payload.diag?.vdda_mv ?? null,
+    payload.diag?.rssi ?? null,
+    payload.diag?.heap_free ?? null,
+    JSON.stringify(payload)
+  );
+
+  const frameId = frameRes.lastInsertRowid;
+
+  if (Array.isArray(payload.pump)) {
+    for (const p of payload.pump) {
+      upsertDevice.run({
+        gw: payload.gw,
+        node: p.node,
+        site: payload.site,
+        addr: p.addr ?? null,
+        state: p.state ?? 'unknown',
+        ts: payload.ts,
+      });
+
+      insertReading.run(
+        frameId,
+        payload.gw,
+        p.node,
+        p.state ?? 'unknown',
+        p.i?.l1 ?? null,
+        p.i?.l2 ?? null,
+        p.i?.l3 ?? null,
+        p.i?.valid ? 1 : 0,
+        p.unbal_pct ?? null,
+        p.uptime_s ?? null,
+        p.starts ?? null
+      );
+    }
+  }
+});
+
+
+// MQTT Connection Callbacks
+mqttClient.on('connect', () => {
+  console.log('Connected to MQTT Broker');
+  mqttClient.subscribe(TOPIC_TELEMETRY, (err) => {
+    if (!err) console.log(`Subscribed to MQTT Topic: ${TOPIC_TELEMETRY}`);
   });
+});
+
+// Handle incoming telemetry payload
+mqttClient.on('message', (topic, message) => {
+  if (topic === TOPIC_TELEMETRY) {
+    try {
+      const payload = JSON.parse(message.toString());
+      savePayloadTransaction(payload);
+      console.log(`[MQTT RECEIVED & SAVED] GW: ${payload.gw} | Seq: ${payload.seq}`);
+    } catch (err) {
+      console.error('Error processing MQTT message:', err.message);
+    }
+  }
+});
+
+// -------------------------------------------------------------
+// 2. Updated API Route Reading from Database
+// -------------------------------------------------------------
+app.get('/api/readings', (req, res) => {
+  console.log('received');
+
+  try {
+    // Query latest telemetry reading for each unique device node
+    const latestReadings = db.prepare(`
+      SELECT 
+        dr.node AS id,
+        d.site,
+        dr.gw,
+        dr.state,
+        dr.i_l1,
+        dr.i_l2,
+        dr.i_l3,
+        dr.unbal_pct,
+        tf.temp_val AS temperature,
+        tf.ts AS timestamp
+      FROM device_readings dr
+      JOIN devices d ON dr.gw = d.gw AND dr.node = d.node
+      JOIN telemetry_frames tf ON dr.frame_id = tf.id
+      WHERE dr.id IN (
+        SELECT MAX(id) FROM device_readings GROUP BY gw, node
+      )
+      ORDER BY dr.node ASC
+    `).all();
+
+    // Map database rows into formatted JSON units output
+    const unitsData = latestReadings.map((row) => ({
+      id: row.id,
+      name: `Pump ${row.id} (${row.gw})`,
+      state: row.state,
+      metrics: {
+        i_l1: row.i_l1,
+        i_l2: row.i_l2,
+        i_l3: row.i_l3,
+        unbalance_percentage: row.unbal_pct,
+        temperature: row.temperature
+      },
+      timestamp: new Date(row.timestamp * 1000).toISOString()
+    }));
+
+    res.json({
+      success: true,
+      total_units: unitsData.length,
+      data: unitsData
+    });
+  } catch (err) {
+    console.error('Database query error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch readings' });
+  }
 });
 
 app.post('/api/createUser', async (req, res) => {
@@ -42,13 +194,6 @@ app.post('/api/createUser', async (req, res) => {
   }
 
   try {
-    if (!(await isHashExists(hash))) {
-      return res.status(400).json({ success: false, message: 'Invalid hash provided' });
-    }
-
-    if (await isHashHasUser(hash)) {
-      return res.status(400).json({ success: false, message: 'User already exists' });
-    }
 
     if (await isUsernameExists(username)) {
       return res.status(400).json({ success: false, message: 'Username already exists' });
