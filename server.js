@@ -12,12 +12,16 @@ const PORT = 5000;
 app.use(express.json());
 
 
-const MQTT_BROKER = 'mqtt://broker.hivemq.com:1883';
-const TOPIC_TELEMETRY = 'site/alex/telemetry';
+const MQTT_BROKER = 'mqtts://d150953c35494136ae381dbb9da9377d.s1.eu.hivemq.cloud:8883';
+const TOPIC_TELEMETRY = 'pumpmon/site-unset/gw-b271f4/pump-01/telemetry';
+const MQTT_USERNAME = 'homedeb';
+const MQTT_PASSWORD = 'Q2e4t6u8o0';
 
 const mqttClient = mqtt.connect(MQTT_BROKER, {
   clientId: 'express_backend_' + Math.random().toString(16).substring(2, 8),
   clean: true,
+  username: MQTT_USERNAME,
+  password: MQTT_PASSWORD,
 });
 
 
@@ -80,8 +84,23 @@ const savePayloadTransaction = db.transaction((payload) => {
 
   const frameId = frameRes.lastInsertRowid;
 
-  if (Array.isArray(payload.pump)) {
-    for (const p of payload.pump) {
+  const pumps = Array.isArray(payload.pump)
+    ? payload.pump
+    : payload.node
+      ? [{
+          ...payload.pump,
+          node: payload.node,
+          addr: payload.addr,
+          i: payload.i,
+          unbal_pct: payload.i?.unbal_pct,
+        }]
+    : payload.pump?.node
+      ? [payload.pump]
+      : payload.pump && typeof payload.pump === 'object'
+        ? Object.values(payload.pump)
+        : [];
+
+  for (const p of pumps.filter((pump) => pump?.node)) {
       upsertDevice.run({
         gw: payload.gw,
         node: p.node,
@@ -104,7 +123,6 @@ const savePayloadTransaction = db.transaction((payload) => {
         p.uptime_s ?? null,
         p.starts ?? null
       );
-    }
   }
 });
 
