@@ -13,7 +13,7 @@ app.use(express.json());
 
 
 const MQTT_BROKER = 'mqtts://d150953c35494136ae381dbb9da9377d.s1.eu.hivemq.cloud:8883';
-const TOPIC_TELEMETRY = 'pumpmon/site-unset/gw-b271f4/pump-01/telemetry';
+const TOPIC_TELEMETRY = 'pumpmon/#';
 const MQTT_USERNAME = 'homedeb';
 const MQTT_PASSWORD = 'Q2e4t6u8o0';
 
@@ -22,6 +22,7 @@ const mqttClient = mqtt.connect(MQTT_BROKER, {
   clean: true,
   username: MQTT_USERNAME,
   password: MQTT_PASSWORD,
+  rejectUnauthorized: false,
 });
 
 
@@ -127,17 +128,16 @@ const savePayloadTransaction = db.transaction((payload) => {
 });
 
 
-// MQTT Connection Callbacks
+
 mqttClient.on('connect', () => {
   console.log('Connected to MQTT Broker');
-  mqttClient.subscribe(TOPIC_TELEMETRY, (err) => {
+  mqttClient.subscribe(TOPIC_TELEMETRY, { qos: 0 }, (err) => {
     if (!err) console.log(`Subscribed to MQTT Topic: ${TOPIC_TELEMETRY}`);
   });
 });
 
-// Handle incoming telemetry payload
+
 mqttClient.on('message', (topic, message) => {
-  if (topic === TOPIC_TELEMETRY) {
     try {
       const payload = JSON.parse(message.toString());
       savePayloadTransaction(payload);
@@ -145,12 +145,8 @@ mqttClient.on('message', (topic, message) => {
     } catch (err) {
       console.error('Error processing MQTT message:', err.message);
     }
-  }
 });
 
-// -------------------------------------------------------------
-// 2. Updated API Route Reading from Database
-// -------------------------------------------------------------
 app.get('/api/readings', (req, res) => {
   console.log('received');
 
@@ -176,6 +172,8 @@ app.get('/api/readings', (req, res) => {
       )
       ORDER BY dr.node ASC
     `).all();
+
+    // remove the gw from the name
 
     // Map database rows into formatted JSON units output
     const unitsData = latestReadings.map((row) => ({
@@ -288,6 +286,72 @@ app.post('/api/changeUsername', (req, res) => {
     })
     .catch((error) => res.status(500).json({ success: false, message: error.message }));
 });
+
+app.get('/api/gw', (req, res) => {
+  try {
+    const gateways = db.prepare('SELECT gw, site FROM gateways').all();
+    res.json({ success: true, data: gateways });
+  } catch (err) {
+    console.error('Database query error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch gateways' });
+  }
+});
+
+
+// test this one
+app.get('/api/gw_readings/:gw', (req, res) => {
+  const { gw } = req.params;
+  try {
+    const latestReadings = db.prepare(`
+        SELECT
+          dr.node AS id,
+          d.site,
+          dr.gw,
+          dr.state,
+          dr.i_l1,
+          dr.i_l2,
+          dr.i_l3,
+          dr.unbal_pct,
+          tf.temp_val AS temperature,
+          tf.ts AS timestamp
+        FROM device_readings dr
+        JOIN devices d ON dr.gw = d.gw AND dr.node = d.node
+        JOIN telemetry_frames tf ON dr.frame_id = tf.id
+        WHERE dr.gw = ?
+          AND dr.id IN (
+            SELECT MAX(id)
+            FROM device_readings
+            WHERE gw = ?
+            GROUP BY node
+          )
+        ORDER BY dr.node ASC
+      `).all(gw, gw);
+
+    const unitsData = latestReadings.map((row) => ({
+      id: row.id,
+      name: `Pump ${row.id} (${row.gw})`,
+      state: row.state,
+      metrics: {
+        i_l1: row.i_l1,
+        i_l2: row.i_l2,
+        i_l3: row.i_l3,
+        unbalance_percentage: row.unbal_pct,
+        temperature: row.temperature,
+      },
+      timestamp: new Date(row.timestamp * 1000).toISOString(),
+    }));
+
+    res.json({
+      success: true,
+      total_units: unitsData.length,
+      data: unitsData,
+    });
+  } catch (err) {
+    console.error('Database query error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch gateway readings' });
+  }
+});
+
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`the server is running`);
