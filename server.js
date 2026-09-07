@@ -1,11 +1,17 @@
 const express = require('express');
 
 const mqtt = require('mqtt');
-const initializeDatabase = require('./db_init.js');
-
-const db = initializeDatabase();
-
-const { createUser, isUser, isUsernameExists, updateUserPassword, updateUsername } = require('./utils/database');
+const {
+  createUser,
+  getGatewayReadings,
+  getGateways,
+  getLatestReadings,
+  isUser,
+  isUsernameExists,
+  savePayload,
+  updateUserPassword,
+  updateUsername,
+} = require('./utils/database');
 const app = express();
 const PORT = 5000;
   
@@ -26,109 +32,6 @@ const mqttClient = mqtt.connect(MQTT_BROKER, {
 });
 
 
-const upsertGateway = db.prepare(`
-  INSERT INTO gateways (gw, site, fw, uid, last_seen_ts)
-  VALUES (@gw, @site, @fw, @uid, @ts)
-  ON CONFLICT(gw) DO UPDATE SET
-    site = excluded.site,
-    fw = excluded.fw,
-    uid = excluded.uid,
-    last_seen_ts = excluded.last_seen_ts,
-    updated_at = CURRENT_TIMESTAMP
-`);
-
-const upsertDevice = db.prepare(`
-  INSERT INTO devices (gw, node, site, addr, state, last_seen_ts)
-  VALUES (@gw, @node, @site, @addr, @state, @ts)
-  ON CONFLICT(gw, node) DO UPDATE SET
-    site = excluded.site,
-    addr = excluded.addr,
-    state = excluded.state,
-    last_seen_ts = excluded.last_seen_ts
-`);
-
-const insertFrame = db.prepare(`
-  INSERT INTO telemetry_frames (site, gw, seq, ts, temp_val, temp_unit, temp_valid, vdda_mv, rssi, heap_free, raw_payload)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-const insertReading = db.prepare(`
-  INSERT INTO device_readings (frame_id, gw, node, state, i_l1, i_l2, i_l3, i_valid, unbal_pct, uptime_s, starts)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-
-
-// Atomic Transaction to Save Data
-const savePayloadTransaction = db.transaction((payload) => {
-  upsertGateway.run({
-    gw: payload.gw,
-    site: payload.site,
-    fw: payload.diag?.fw ?? null,
-    uid: payload.diag?.uid ?? null,
-    ts: payload.ts,
-  });
-
-  const frameRes = insertFrame.run(
-    payload.site,
-    payload.gw,
-    payload.seq,
-    payload.ts,
-    payload.t?.val ?? null,
-    payload.t?.unit ?? 'C',
-    payload.t?.valid ? 1 : 0,
-    payload.diag?.vdda_mv ?? null,
-    payload.diag?.rssi ?? null,
-    payload.diag?.heap_free ?? null,
-    JSON.stringify(payload)
-  );
-
-  const frameId = frameRes.lastInsertRowid;
-
-  const pumps = Array.isArray(payload.pump)
-    ? payload.pump
-    : payload.node
-      ? [{
-          ...payload.pump,
-          node: payload.node,
-          addr: payload.addr,
-          i: payload.i,
-          unbal_pct: payload.i?.unbal_pct,
-        }]
-    : payload.pump?.node
-      ? [payload.pump]
-      : payload.pump && typeof payload.pump === 'object'
-        ? Object.values(payload.pump)
-        : [];
-
-  for (const p of pumps.filter((pump) => pump?.node)) {
-      upsertDevice.run({
-        gw: payload.gw,
-        node: p.node,
-        site: payload.site,
-        addr: p.addr ?? null,
-        state: p.state ?? 'unknown',
-        ts: payload.ts,
-      });
-
-      insertReading.run(
-        frameId,
-        payload.gw,
-        p.node,
-        p.state ?? 'unknown',
-        p.i?.l1 ?? null,
-        p.i?.l2 ?? null,
-        p.i?.l3 ?? null,
-        p.i?.valid ? 1 : 0,
-        p.unbal_pct ?? null,
-        p.uptime_s ?? null,
-        p.starts ?? null
-      );
-  }
-});
-
-
-
 mqttClient.on('connect', () => {
   console.log('Connected to MQTT Broker');
   mqttClient.subscribe(TOPIC_TELEMETRY, { qos: 0 }, (err) => {
@@ -140,7 +43,7 @@ mqttClient.on('connect', () => {
 mqttClient.on('message', (topic, message) => {
     try {
       const payload = JSON.parse(message.toString());
-      savePayloadTransaction(payload);
+      savePayload(payload);
       console.log(`[MQTT RECEIVED & SAVED] GW: ${payload.gw} | Seq: ${payload.seq}`);
     } catch (err) {
       console.error('Error processing MQTT message:', err.message);
@@ -152,26 +55,7 @@ app.get('/api/readings', (req, res) => {
 
   try {
     // Query latest telemetry reading for each unique device node
-    const latestReadings = db.prepare(`
-      SELECT 
-        dr.node AS id,
-        d.site,
-        dr.gw,
-        dr.state,
-        dr.i_l1,
-        dr.i_l2,
-        dr.i_l3,
-        dr.unbal_pct,
-        tf.temp_val AS temperature,
-        tf.ts AS timestamp
-      FROM device_readings dr
-      JOIN devices d ON dr.gw = d.gw AND dr.node = d.node
-      JOIN telemetry_frames tf ON dr.frame_id = tf.id
-      WHERE dr.id IN (
-        SELECT MAX(id) FROM device_readings GROUP BY gw, node
-      )
-      ORDER BY dr.node ASC
-    `).all();
+    const latestReadings = getLatestReadings();
 
     // remove the gw from the name
 
@@ -289,7 +173,7 @@ app.post('/api/changeUsername', (req, res) => {
 
 app.get('/api/gw', (req, res) => {
   try {
-    const gateways = db.prepare('SELECT gw, site FROM gateways').all();
+    const gateways = getGateways();
     res.json({ success: true, data: gateways });
   } catch (err) {
     console.error('Database query error:', err.message);
@@ -302,30 +186,7 @@ app.get('/api/gw', (req, res) => {
 app.get('/api/gw_readings/:gw', (req, res) => {
   const { gw } = req.params;
   try {
-    const latestReadings = db.prepare(`
-        SELECT
-          dr.node AS id,
-          d.site,
-          dr.gw,
-          dr.state,
-          dr.i_l1,
-          dr.i_l2,
-          dr.i_l3,
-          dr.unbal_pct,
-          tf.temp_val AS temperature,
-          tf.ts AS timestamp
-        FROM device_readings dr
-        JOIN devices d ON dr.gw = d.gw AND dr.node = d.node
-        JOIN telemetry_frames tf ON dr.frame_id = tf.id
-        WHERE dr.gw = ?
-          AND dr.id IN (
-            SELECT MAX(id)
-            FROM device_readings
-            WHERE gw = ?
-            GROUP BY node
-          )
-        ORDER BY dr.node ASC
-      `).all(gw, gw);
+    const latestReadings = getGatewayReadings(gw);
 
     const unitsData = latestReadings.map((row) => ({
       id: row.id,
