@@ -113,8 +113,10 @@ function getLatestReadings() {
             dr.i_l1,
             dr.i_l2,
             dr.i_l3,
+            dr.i_valid,
             dr.unbal_pct,
             tf.temp_val AS temperature,
+            tf.temp_valid AS temp_valid,
             tf.ts AS timestamp
         FROM device_readings dr
         JOIN devices d ON dr.gw = d.gw AND dr.node = d.node
@@ -140,8 +142,10 @@ function getGatewayReadings(gw) {
             dr.i_l1,
             dr.i_l2,
             dr.i_l3,
+            dr.i_valid,
             dr.unbal_pct,
             tf.temp_val AS temperature,
+            tf.temp_valid AS temp_valid,
             tf.ts AS timestamp
         FROM device_readings dr
         JOIN devices d ON dr.gw = d.gw AND dr.node = d.node
