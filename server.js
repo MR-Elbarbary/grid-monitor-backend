@@ -68,8 +68,10 @@ app.get('/api/readings', (req, res) => {
         i_l1: row.i_l1,
         i_l2: row.i_l2,
         i_l3: row.i_l3,
+        i_valid: row.i_valid,
         unbalance_percentage: row.unbal_pct,
-        temperature: row.temperature
+        temperature: row.temperature,
+        temperature_valid: row.temp_valid
       },
       timestamp: new Date(row.timestamp * 1000).toISOString()
     }));
@@ -198,6 +200,8 @@ app.get('/api/gw_readings/:gw', (req, res) => {
         i_l3: row.i_l3,
         unbalance_percentage: row.unbal_pct,
         temperature: row.temperature,
+        temperature_valid: row.temp_valid,
+        i_valid: row.i_valid,
       },
       timestamp: new Date(row.timestamp * 1000).toISOString(),
     }));
