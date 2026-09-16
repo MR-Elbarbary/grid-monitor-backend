@@ -3,6 +3,7 @@ const express = require('express');
 const mqtt = require('mqtt');
 const {
   createUser,
+  getActiveAlerts,
   getGatewayReadings,
   getGateways,
   getLatestReadings,
@@ -64,15 +65,8 @@ app.get('/api/readings', (req, res) => {
       id: row.id,
       name: `Pump ${row.id} (${row.gw})`,
       state: row.state,
-      metrics: {
-        i_l1: row.i_l1,
-        i_l2: row.i_l2,
-        i_l3: row.i_l3,
-        i_valid: row.i_valid,
-        unbalance_percentage: row.unbal_pct,
-        temperature: row.temperature,
-        temperature_valid: row.temp_valid
-      },
+      metrics: getMetrics(row),
+      alerts: parseAlerts(row),
       timestamp: new Date(row.timestamp * 1000).toISOString()
     }));
 
@@ -84,6 +78,47 @@ app.get('/api/readings', (req, res) => {
   } catch (err) {
     console.error('Database query error:', err.message);
     res.status(500).json({ success: false, error: 'Failed to fetch readings' });
+  }
+});
+
+function parseAlerts(reading) {
+  try {
+    return JSON.parse(reading.alerts_json || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function getMetrics(reading) {
+  const metrics = {
+    i_l1: reading.i_l1,
+    i_l2: reading.i_l2,
+    i_l3: reading.i_l3,
+    i_valid: reading.i_valid,
+    unbalance_percentage: reading.unbal_pct,
+    temperature: reading.temperature,
+    temperature_valid: reading.temp_valid,
+  };
+
+  for (const alert of parseAlerts(reading)) {
+    if (alert.code !== 'CT_DISCONNECTED') continue;
+    const connector = alert.detail?.connector;
+    const phase = connector?.replace('ct', 'i_l');
+    if (phase && Object.prototype.hasOwnProperty.call(metrics, phase)) {
+      metrics[phase] = null;
+    }
+  }
+
+  return metrics;
+}
+
+app.get('/api/alerts', (req, res) => {
+  try {
+    const alerts = getActiveAlerts(req.query.gw || null);
+    res.json({ success: true, total: alerts.length, data: alerts });
+  } catch (err) {
+    console.error('Alert query error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch alerts' });
   }
 });
 
@@ -194,15 +229,8 @@ app.get('/api/gw_readings/:gw', (req, res) => {
       id: row.id,
       name: `Pump ${row.id} (${row.gw})`,
       state: row.state,
-      metrics: {
-        i_l1: row.i_l1,
-        i_l2: row.i_l2,
-        i_l3: row.i_l3,
-        unbalance_percentage: row.unbal_pct,
-        temperature: row.temperature,
-        temperature_valid: row.temp_valid,
-        i_valid: row.i_valid,
-      },
+      metrics: getMetrics(row),
+      alerts: parseAlerts(row),
       timestamp: new Date(row.timestamp * 1000).toISOString(),
     }));
 

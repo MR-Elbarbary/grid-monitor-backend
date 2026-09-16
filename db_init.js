@@ -38,6 +38,7 @@ function initializeDatabase(dbPath = 'telemetry.db') {
       site TEXT NOT NULL,
       addr INTEGER,
       state TEXT,
+      alerts_json TEXT NOT NULL DEFAULT '[]',
       last_seen_ts INTEGER,
       PRIMARY KEY (gw, node),
 
@@ -226,6 +227,11 @@ function initializeDatabase(dbPath = 'telemetry.db') {
   `;
 
   db.exec(schemaSql);
+
+  const deviceColumns = db.prepare('PRAGMA table_info(devices)').all();
+  if (!deviceColumns.some((column) => column.name === 'alerts_json')) {
+    db.exec("ALTER TABLE devices ADD COLUMN alerts_json TEXT NOT NULL DEFAULT '[]'");
+  }
 
   console.log('✅ Database schema successfully created/verified.');
 

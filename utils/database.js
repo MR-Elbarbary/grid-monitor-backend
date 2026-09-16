@@ -14,12 +14,13 @@ const upsertGateway = db.prepare(`
 `);
 
 const upsertDevice = db.prepare(`
-  INSERT INTO devices (gw, node, site, addr, state, last_seen_ts)
-  VALUES (@gw, @node, @site, @addr, @state, @ts)
+  INSERT INTO devices (gw, node, site, addr, state, alerts_json, last_seen_ts)
+  VALUES (@gw, @node, @site, @addr, @state, @alertsJson, @ts)
   ON CONFLICT(gw, node) DO UPDATE SET
     site = excluded.site,
     addr = excluded.addr,
     state = excluded.state,
+    alerts_json = excluded.alerts_json,
     last_seen_ts = excluded.last_seen_ts
 `);
 
@@ -69,7 +70,6 @@ function saveSensorValue({ gw, node, frameId, timestamp, name, unit, value, vali
 }
 
 function getPumps(payload) {
-  if (Array.isArray(payload.pump)) return payload.pump;
   if (payload.node) {
     return [{
       ...payload.pump,
@@ -79,9 +79,105 @@ function getPumps(payload) {
       unbal_pct: payload.i?.unbal_pct,
     }];
   }
+  if (Array.isArray(payload.pump)) return payload.pump;
   if (payload.pump?.node) return [payload.pump];
   if (payload.pump && typeof payload.pump === 'object') return Object.values(payload.pump);
   return [];
+}
+
+const FAULT_DEFINITIONS = {
+  TEMP_SENSOR_LOST: { severity: 'critical', title: 'Temperature sensor lost', action: 'Plug the sensor jack into the board or replace the temperature probe.' },
+  CT_DISCONNECTED: { severity: 'critical', title: 'Current transformer disconnected', action: 'Check the named CT jack, wiring, and plug seating.' },
+  PHASE_LOSS: { severity: 'critical', title: 'Phase loss', action: 'Inspect motor connections and the contactor.' },
+  LOCKED_ROTOR: { severity: 'critical', title: 'Locked rotor', action: 'Check the motor for jamming or severe overload.' },
+  OVERCURRENT: { severity: 'critical', title: 'Overcurrent', action: 'Check the pump load and operating conditions.' },
+  OVERTEMP: { severity: 'critical', title: 'Overtemperature', action: "Check the motor's cooling system and operating load." },
+  UNBALANCE: { severity: 'warning', title: 'Phase unbalance', action: "Inspect for degrading connections or winding faults against the pump's baseline." },
+  BIAS_FAULT: { severity: 'critical', title: 'Current sensor bias fault', action: 'Repair or replace the node board.' },
+  CT_SATURATION: { severity: 'warning', title: 'CT saturation', action: 'Replace the transducer with a compliant CT.' },
+  COMMS_LOST: { severity: 'critical', title: 'Communications lost', action: 'Check gateway power, bus wiring, and site internet.' },
+  BAD_ADDRESS: { severity: 'critical', title: 'Invalid node address', action: 'Inspect the resistor straps on the node PCB.' },
+  BUTTON_STUCK: { severity: 'warning', title: 'ACK button stuck', action: 'Inspect the node front-panel button.' },
+  RTC_BATTERY: { severity: 'warning', title: 'RTC battery fault', action: 'Replace the CR2032 battery.' },
+  EEPROM_FAULT: { severity: 'critical', title: 'EEPROM fault', action: 'Re-commit configuration or replace the EEPROM.' },
+  NOT_COMMISSIONED: { severity: 'warning', title: 'Node not commissioned', action: "Set the pump's Full Load Amps in the gateway portal." },
+};
+
+function deriveFaults(payload, pump) {
+  const diagnostic = payload.diag ?? {};
+  const current = pump.i ?? {};
+  const temperature = payload.t ?? {};
+  const derived = [];
+  const add = (code, detail = {}) => derived.push({ code, detail });
+
+  if (diagnostic.conn?.temp === false || temperature.valid === false) {
+    add('TEMP_SENSOR_LOST', {
+      connectorFitted: diagnostic.conn?.temp,
+      temperatureValid: temperature.valid,
+    });
+  }
+
+  for (const channel of ['ct1', 'ct2', 'ct3']) {
+    const phase = channel.slice(-1);
+    const currentValue = Number(current[`l${phase}`]);
+    if (diagnostic.conn?.[channel] === false
+      && current.valid !== false
+      && Number.isFinite(currentValue)
+      && currentValue === 0) {
+      add('CT_DISCONNECTED', { connector: channel, current: currentValue });
+    }
+  }
+
+  if (current.valid !== false) {
+    const phases = [current.l1, current.l2, current.l3].map(Number);
+    const average = phases.reduce((sum, value) => sum + value, 0) / phases.length;
+    if (phases.every(Number.isFinite) && average > 0 && Math.min(...phases) <= average * 0.2) {
+      add('PHASE_LOSS', { l1: current.l1, l2: current.l2, l3: current.l3 });
+    }
+  }
+
+  if (Array.isArray(diagnostic.dc)
+    && diagnostic.dc.length === 3
+    && diagnostic.dc.every((value) => Number.isFinite(Number(value))
+      && (Number(value) < 2010 || Number(value) > 2090))) {
+    add('BIAS_FAULT', { dc: diagnostic.dc });
+  }
+
+  return derived;
+}
+
+function normalizeFaults(payload, pump) {
+  const firmwareFaults = [
+    ...(Array.isArray(payload.faults) ? payload.faults.map((code) => ({ code })) : []),
+    ...(Array.isArray(pump.faults) ? pump.faults.map((code) => ({ code })) : []),
+  ];
+  const detectedFaults = [...firmwareFaults, ...deriveFaults(payload, pump)];
+  const uniqueFaults = new Map();
+
+  for (const fault of detectedFaults) {
+    if (typeof fault.code === 'string' && !uniqueFaults.has(fault.code)) {
+      uniqueFaults.set(fault.code, fault);
+    }
+  }
+
+  return [...uniqueFaults.values()].map(({ code, detail = {} }) => {
+      const definition = FAULT_DEFINITIONS[code] ?? {
+        severity: 'critical',
+        title: code.replaceAll('_', ' ').toLowerCase(),
+        action: 'Inspect the node and gateway diagnostics.',
+      };
+      return {
+        code,
+        severity: definition.severity,
+        title: definition.title,
+        action: definition.action,
+        gateway: payload.gw,
+        node: pump.node,
+        active: true,
+        timestamp: new Date(payload.ts * 1000).toISOString(),
+        detail,
+      };
+    });
 }
 
 const savePayloadTransaction = db.transaction((payload) => {
@@ -111,16 +207,17 @@ const savePayloadTransaction = db.transaction((payload) => {
       site: payload.site,
       addr: pump.addr ?? null,
       state: pump.state ?? 'unknown',
+      alertsJson: JSON.stringify(normalizeFaults(payload, pump)),
       ts: payload.ts,
     });
 
     const current = pump.i ?? {};
     const readings = [
-      ['current_l1', 'A', current.l1, current.valid],
-      ['current_l2', 'A', current.l2, current.valid],
-      ['current_l3', 'A', current.l3, current.valid],
-      ['current_unbalance', '%', pump.unbal_pct ?? current.unbal_pct, current.valid],
-      ['temperature', payload.t?.unit ?? 'C', payload.t?.val, payload.t?.valid],
+      ['current_l1', 'A', current.valid === false ? null : current.l1, current.valid],
+      ['current_l2', 'A', current.valid === false ? null : current.l2, current.valid],
+      ['current_l3', 'A', current.valid === false ? null : current.l3, current.valid],
+      ['current_unbalance', '%', current.valid === false ? null : (pump.unbal_pct ?? current.unbal_pct), current.valid],
+      ['temperature', 'C', payload.t?.val, payload.t?.valid],
     ];
 
     for (const [name, unit, value, valid] of readings) {
@@ -162,9 +259,18 @@ const latestReadingsQuery = `
     (SELECT cr.value_num FROM current_readings cr JOIN sensors s ON s.id = cr.sensor_id
       WHERE s.gw = d.gw AND s.node = d.node AND s.name = 'temperature') AS temperature,
     (SELECT cr.valid FROM current_readings cr JOIN sensors s ON s.id = cr.sensor_id
-      WHERE s.gw = d.gw AND s.node = d.node AND s.name = 'temperature') AS temp_valid
+      WHERE s.gw = d.gw AND s.node = d.node AND s.name = 'temperature') AS temp_valid,
+    d.alerts_json
   FROM devices d
 `;
+
+function parseAlerts(row) {
+  try {
+    return JSON.parse(row.alerts_json || '[]');
+  } catch {
+    return [];
+  }
+}
 
 function getLatestReadings() {
   return db.prepare(`${latestReadingsQuery} ORDER BY d.node ASC`).all();
@@ -176,6 +282,13 @@ function getGateways() {
 
 function getGatewayReadings(gw) {
   return db.prepare(`${latestReadingsQuery} WHERE d.gw = ? ORDER BY d.node ASC`).all(gw);
+}
+
+function getActiveAlerts(gw = null) {
+  const rows = gw
+    ? db.prepare('SELECT alerts_json FROM devices WHERE gw = ?').all(gw)
+    : db.prepare('SELECT alerts_json FROM devices').all();
+  return rows.flatMap(parseAlerts);
 }
 
 function createUser(username, email, password) {
@@ -209,6 +322,7 @@ function updateUsername(oldUsername, newUsername) {
 }
 
 module.exports = {
+  getActiveAlerts,
   createUser,
   getGatewayReadings,
   getGateways,
