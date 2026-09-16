@@ -109,6 +109,14 @@ function deriveFaults(payload, pump) {
   const temperature = payload.t ?? {};
   const derived = [];
   const add = (code, detail = {}) => derived.push({ code, detail });
+  const timestamp = Number(payload.ts);
+  const ageSeconds = Number.isFinite(timestamp) && timestamp > 0
+    ? Math.floor(Date.now() / 1000) - timestamp
+    : null;
+
+  if (ageSeconds !== null && ageSeconds > 15) {
+    add('COMMS_LOST', { ageSeconds, thresholdSeconds: 15 });
+  }
 
   if (diagnostic.conn?.temp === false || temperature.valid === false) {
     add('TEMP_SENSOR_LOST', {
